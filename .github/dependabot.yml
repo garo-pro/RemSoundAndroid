@@ -22,6 +22,13 @@ updates:
       prefix: build
     groups:
       gradle-minor-and-patch:
+        # Kotlin and AGP are excluded on purpose. Their *minor* releases break the build
+        # (Kotlin 2.4 turned the kotlinOptions String DSL into a hard error, and an AGP minor
+        # can demand a new Gradle and compileSdk), so they do not belong in the batch that is
+        # safe to merge on a green check. They still arrive, just as their own PRs.
+        exclude-patterns:
+          - "org.jetbrains.kotlin*"
+          - "com.android.*"
         update-types:
           - minor
           - patch

@@ -1,11 +1,12 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     alias(libs.plugins.android.library)
-    alias(libs.plugins.kotlin.android)
 }
 
 android {
     namespace = "com.garo.remsound.kit"
-    compileSdk = 35
+    compileSdk = 37
 
     defaultConfig {
         minSdk = 26
@@ -22,11 +23,18 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
     testOptions {
         unitTests.isReturnDefaultValues = true
+    }
+}
+
+// AGP 9 provides Kotlin support itself, so the `org.jetbrains.kotlin.android` plugin is gone
+// and the old `android { kotlinOptions { jvmTarget = "17" } }` block with it. The JVM target
+// would default to compileOptions.targetCompatibility, but it is pinned explicitly here
+// because 17 is a deliberate choice rather than something to inherit silently.
+kotlin {
+    compilerOptions {
+        jvmTarget = JvmTarget.JVM_17
     }
 }
 
