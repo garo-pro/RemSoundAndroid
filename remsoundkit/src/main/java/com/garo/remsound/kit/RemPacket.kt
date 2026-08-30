@@ -167,7 +167,7 @@ object RemPacket {
         out[32] = format.lane.wireValue.toByte()
         // 33..35 stay zero (reserved).
         if (withFingerprint) {
-            System.arraycopy(passwordFingerprint!!, 0, out, 36, PASSWORD_FINGERPRINT_SIZE)
+            System.arraycopy(passwordFingerprint, 0, out, 36, PASSWORD_FINGERPRINT_SIZE)
         }
         return out
     }
