@@ -2,7 +2,6 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     alias(libs.plugins.android.library)
-    alias(libs.plugins.kotlin.android)
 }
 
 android {
@@ -29,8 +28,10 @@ android {
     }
 }
 
-// Kotlin 2.4 removed the `kotlinOptions { jvmTarget = "17" }` String DSL inside `android`;
-// the JVM target is set through the Kotlin extension instead.
+// AGP 9 provides Kotlin support itself, so the `org.jetbrains.kotlin.android` plugin is gone
+// and the old `android { kotlinOptions { jvmTarget = "17" } }` block with it. The JVM target
+// would default to compileOptions.targetCompatibility, but it is pinned explicitly here
+// because 17 is a deliberate choice rather than something to inherit silently.
 kotlin {
     compilerOptions {
         jvmTarget = JvmTarget.JVM_17
