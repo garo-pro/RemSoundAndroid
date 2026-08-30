@@ -1,0 +1,18 @@
+# Authored on Windows, built on Ubuntu CI runners. Force LF on everything a runner executes:
+# a CRLF run-block turns bash heredoc terminators into ones carrying a trailing carriage
+# return, which never match their opener, and it fails in ways that look nothing like a
+# line-ending problem. core.autocrlf usually normalises the committed blob, but only this
+# makes it deterministic regardless of each contributor's git config.
+* text=auto
+
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.sh      text eol=lf
+*.py      text eol=lf
+gradlew   text eol=lf
+*.kt      text eol=lf
+*.kts     text eol=lf
+
+# The wrapper jar and the cue sounds are binary; never let them be line-ending-mangled.
+*.jar     binary
+*.wav     binary

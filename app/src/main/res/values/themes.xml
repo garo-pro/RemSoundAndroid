@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Compose draws the whole UI, so this only has to hand the window a sane background and
+        let the system bars be themed edge to edge.
+    -->
+    <style name="Theme.RemSound" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">?android:attr/colorBackground</item>
+    </style>
+</resources>

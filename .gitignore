@@ -1,0 +1,23 @@
+# Gradle / Android Studio
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Signing material must never land here — CI builds unsigned.
+*.jks
+*.keystore
+
+# macOS / Windows shell noise
+.DS_Store
+Thumbs.db
+
+# Downloaded CI logs dropped into the repo for debugging
+logs_*/
+
+# Claude session notes (never committed)
+.claude-notes/
