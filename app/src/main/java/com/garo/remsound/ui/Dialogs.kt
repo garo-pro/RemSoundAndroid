@@ -69,7 +69,7 @@ fun AboutDialog(onDismiss: () -> Unit) {
                 RepoLink(
                     title = "RemSound for Android",
                     detail = "this app",
-                    url = "https://github.com/garo/RemSoundAndroid",
+                    url = "https://github.com/garo-pro/RemSoundAndroid",
                     accessibleName = "RemSound for Android source code on GitHub",
                 )
                 RepoLink(
