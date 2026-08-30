@@ -1,3 +1,5 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -6,7 +8,10 @@ plugins {
 
 android {
     namespace = "com.garo.remsound"
-    compileSdk = 35
+    // compileSdk only controls which APIs the code compiles against; Compose 1.12 and AGP 9
+    // both require 37. targetSdk stays at 35 deliberately — that is the runtime-behaviour
+    // opt-in and a separate product decision.
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.garo.remsound"
@@ -32,9 +37,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
     buildFeatures {
         compose = true
     }
@@ -49,6 +51,14 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+    }
+}
+
+// Kotlin 2.4 removed the `kotlinOptions { jvmTarget = "17" }` String DSL inside `android`;
+// the JVM target is set through the Kotlin extension instead.
+kotlin {
+    compilerOptions {
+        jvmTarget = JvmTarget.JVM_17
     }
 }
 
