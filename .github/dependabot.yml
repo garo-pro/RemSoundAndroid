@@ -1,0 +1,46 @@
+# Dependency updates. Every library and plugin version in this repo lives in
+# gradle/libs.versions.toml, so one "gradle" entry at the root covers both modules.
+#
+# Patch and minor bumps are grouped into a single PR per ecosystem to keep the
+# noise down; majors come through on their own, because the ones that matter here
+# (AGP, Kotlin, the Compose BOM) need a human to look at them. Note that the
+# Kotlin plugin and the Compose compiler plugin share the `kotlin` version ref,
+# so they move together the way they have to.
+version: 2
+
+updates:
+  - package-ecosystem: gradle
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    commit-message:
+      prefix: build
+    groups:
+      gradle-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: ci
+    groups:
+      actions-all:
+        update-types:
+          - major
+          - minor
+          - patch
