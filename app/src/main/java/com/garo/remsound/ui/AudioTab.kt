@@ -75,7 +75,8 @@ fun AudioTab(controller: ReceiverController) {
             checked = autoTune,
             onCheckedChange = { controller.setAutoTuneLatencyEnabled(it) },
             hint = "Raises the delay when the network is unsteady and lowers it again when the " +
-                "network settles, instead of holding the value above",
+                "network settles, instead of holding the value above. On by default, so the " +
+                "delay above moves on its own; turn this off to hold the value you set.",
         )
         if (autoTune && autoTuneNote != null) {
             FormText(

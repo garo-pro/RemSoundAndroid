@@ -223,14 +223,21 @@ class ReceiverController private constructor(context: Context) {
     private var lastResolveAttempt = 0L
     private var resolveInFlight = false
 
-    /** Addresses currently delivering audio — drives the "Receiving from N peers" summary. */
-    private var audibleAddresses: Set<Int> = emptySet()
+    /** Peers currently delivering audio — drives the "Receiving from N peers" summary. */
+    private var audiblePeerIds: Set<String> = emptySet()
 
     /**
-     * Connect/disconnect cue state per selected peer, keyed by the stable primary address.
-     * Mirrors the Windows receiver's hysteresis rule — see [updateCues].
+     * Connect/disconnect cue state per selected peer. Keyed by the peer's row id, which is
+     * stable across path changes — see [ConnectionCueTracker] for why an address is not.
      */
-    private val peerConnectedState = mutableMapOf<Int, Boolean>()
+    private val cueTracker = ConnectionCueTracker()
+
+    /**
+     * Keeps a selected peer's addresses in the allow-list across a gap in discovery, so a
+     * momentary loss of announcements over a VPN cannot tear down a stream that is still
+     * arriving. See [SelectionGrace].
+     */
+    private val selectionGrace = SelectionGrace()
 
     private var refreshJob: Job? = null
 
@@ -420,8 +427,9 @@ class ReceiverController private constructor(context: Context) {
         output.stop()
         engine.stop()
         _isRunning.value = false
-        audibleAddresses = emptySet()
-        peerConnectedState.clear() // cleared silently — stopping is its own feedback
+        audiblePeerIds = emptySet()
+        cueTracker.reset() // cleared silently — stopping is its own feedback
+        selectionGrace.clear()
         _statusSummary.value = "Stopped"
         _connectionDetails.value = emptyList()
         _trafficSummary.value = ""
@@ -773,31 +781,59 @@ class ReceiverController private constructor(context: Context) {
         val allowed = mutableSetOf<Int>()
         val tracked = mutableListOf<UdpEndpoint>()
         val unicast = mutableListOf<Int>()
+        // Which addresses belong to the same box, so the engine can tell a second path to one
+        // sender from a second sender and refuse to play the same stream twice.
+        val groups = mutableMapOf<Int, String>()
+        val selectedNow = mutableListOf<UdpEndpoint>()
 
         for (peer in discovery.currentPeers) {
             unicast.addAll(peer.addresses)
+            for (address in peer.addresses) groups[address] = "d-${peer.instanceId}"
             // Selected if ANY of its addresses is — and then allow/track ALL of them: the sender
             // picks its own route, so audio can arrive from any of the peer's paths.
             if (peer.addressStrings.any { selectedAddresses.contains(it) }) {
                 allowed.addAll(peer.addresses)
                 for (endpoint in peer.audioEndpoints) {
                     if (!tracked.contains(endpoint)) tracked.add(endpoint)
+                    selectedNow.add(endpoint)
                 }
             }
         }
         for (peer in manualPeers) {
             for (endpoint in manualResolved[peer.id].orEmpty()) {
                 unicast.add(endpoint.address)
+                // Discovery's grouping wins where both know the address — it is the one that can
+                // see that two addresses are the same instance.
+                groups.putIfAbsent(endpoint.address, "m-${peer.id}")
                 if (selectedAddresses.contains(endpoint.addressString) ||
                     selectedAddresses.contains(peer.host)
                 ) {
                     allowed.add(endpoint.address)
                     if (!tracked.contains(endpoint)) tracked.add(endpoint)
+                    selectedNow.add(endpoint)
                 }
             }
         }
 
+        // Discovery liveness must not gate playback. This rebuild is event-driven — the DNS
+        // retry alone re-runs it every few seconds — so without a grace window it can land in a
+        // moment when a peer that is still streaming has aged out of discovery, and
+        // setAllowedSenders would then close its live sessions. Remembered endpoints are
+        // intersected with the CURRENT selection, so deselecting still cuts a peer instantly.
+        val now = System.currentTimeMillis()
+        selectionGrace.record(selectedNow, now)
+        for (endpoint in selectionGrace.remembered(now)) {
+            if (!selectedAddresses.contains(endpoint.addressString)) continue
+            if (allowed.add(endpoint.address)) {
+                // Keep probing and announcing to it too: the heartbeat is the other half of the
+                // connected/lost rule, and the unicast announcement is what heals discovery.
+                if (!tracked.contains(endpoint)) tracked.add(endpoint)
+                unicast.add(endpoint.address)
+            }
+        }
+
         engine.setAllowedSenders(allowed)
+        engine.setPeerAddressGroups(groups)
         heartbeat.setTrackedPeers(tracked)
         discovery.setUnicastPeerAddresses(unicast)
     }
@@ -1397,6 +1433,17 @@ class ReceiverController private constructor(context: Context) {
         }
         val resyncs = stats.resyncs - oldest.stats.resyncs
         if (resyncs > 0) lines.add("Sender stream restarts last minute: $resyncs")
+
+        // A sender transmitting one stream down two paths at once (typically a LAN address and a
+        // VPN address for the same machine) used to be invisible from here — it simply sounded
+        // bad. The second path is ignored rather than mixed in; say so, because the real fix is
+        // on the sending side.
+        engine.duplicatePathEndpoint?.let { duplicate ->
+            lines.add(
+                "The same peer is also sending this stream from ${duplicate.addressString}; " +
+                    "that second copy is being ignored",
+            )
+        }
     }
 
     /**
@@ -1433,72 +1480,38 @@ class ReceiverController private constructor(context: Context) {
     }
 
     private fun updateCues() {
-        // Mirrors the Windows receiver's cue rule: connected the moment audio arrives OR the
-        // heartbeat is solidly healthy; lost only when audio has stopped AND the heartbeat has
-        // gone unreachable. Everything in between (heartbeat stale, audio briefly paused) HOLDS
-        // the previous state — hysteresis, so a two-second Wi-Fi/VPN stall never fires a false
-        // disconnect+connect cue pair. Audio arrives hundreds of times a second, so a 3-second
-        // gap is a genuine interruption, not jitter; the unreachable heartbeat (~5 s of no
-        // replies) is the slower gate for a real, total loss.
+        // The hysteresis rule itself lives in [ConnectionCueTracker] (pure, so CI can test it);
+        // this only gathers the per-peer facts it decides on. Audio arrives hundreds of times a
+        // second, so a 3-second gap is a genuine interruption rather than jitter, and the
+        // unreachable heartbeat (~5 s of no replies) is the slower gate for a real, total loss.
         val audioWindowMs = 3000L
         val health = heartbeat.allPeerHealth()
-        val nowAudible = mutableSetOf<Int>()
-        val seen = mutableSetOf<Int>()
-        val connected = mutableListOf<Int>()
-        val lost = mutableListOf<Int>()
+        val nowAudible = mutableSetOf<String>()
 
-        for (entry in _peers.value) {
-            if (!entry.isSelected) continue
-            val primary = entry.audioEndpoint ?: continue
-            // Keyed by the stable primary address even when audio arrives on another path, so a
-            // path switch does not fire a spurious disconnect+connect cue pair.
-            val key = primary.address
-            seen.add(key)
+        val observed = _peers.value.mapNotNull { entry ->
+            if (!entry.isSelected || entry.audioEndpoints.isEmpty()) return@mapNotNull null
+            // ANY path counts: the sender picks its own route, and a peer heard over Tailscale
+            // while its LAN leg is quiet is connected, not lost.
             val audioFlowing = entry.addresses.any { engine.isAudioFlowing(it, audioWindowMs) }
-            if (audioFlowing) nowAudible.add(key)
-
-            val state = bestHealth(entry.addresses, health)?.state ?: PeerHealthState.UNKNOWN
-            val isConnected = audioFlowing || state == PeerHealthState.HEALTHY
-            val isLost = !audioFlowing && state == PeerHealthState.UNREACHABLE
-            val wasConnected = peerConnectedState[key] ?: false
-            when {
-                isConnected && !wasConnected -> {
-                    connected.add(key)
-                    peerConnectedState[key] = true
-                }
-                isLost && wasConnected -> {
-                    lost.add(key)
-                    peerConnectedState[key] = false
-                }
-                // First sighting and neither clearly connected nor lost (address entered but no
-                // audio or pong yet) — seed quietly. If it later goes unreachable without ever
-                // connecting, that is a connect-FAILED event and stays silent too.
-                !peerConnectedState.containsKey(key) -> peerConnectedState[key] = false
-            }
+            if (audioFlowing) nowAudible.add(entry.id)
+            ConnectionCueTracker.Peer(
+                id = entry.id,
+                name = entry.name,
+                audioFlowing = audioFlowing,
+                health = bestHealth(entry.addresses, health)?.state ?: PeerHealthState.UNKNOWN,
+            )
         }
 
-        // Peers that vanished from tracking entirely (deselected or expired): a disconnect cue
-        // only if they were connected when last seen — one that never connected stays quiet.
-        val vanished = peerConnectedState.keys.filterNot { seen.contains(it) }
-        for (key in vanished) {
-            if (peerConnectedState[key] == true) lost.add(key)
-            peerConnectedState.remove(key)
-        }
+        val events = cueTracker.update(observed)
+        audiblePeerIds = nowAudible
+        if (events.isEmpty) return
 
-        if (connected.isNotEmpty()) cues?.play(CuePlayer.Cue.CONNECT)
-        if (lost.isNotEmpty()) cues?.play(CuePlayer.Cue.DISCONNECT)
+        if (events.connected.isNotEmpty()) cues?.play(CuePlayer.Cue.CONNECT)
+        if (events.lost.isNotEmpty()) cues?.play(CuePlayer.Cue.DISCONNECT)
         // "Connected"/"lost", not "receiving audio" — with the heartbeat leg of the rule, a peer
         // can be connected before (or without) sending any audio.
-        for (address in connected) announce("Connected to ${nameFor(address)}")
-        for (address in lost) announce("Connection to ${nameFor(address)} lost")
-        audibleAddresses = nowAudible
-    }
-
-    private fun nameFor(address: Int): String {
-        val addressString = UdpEndpoint(address, 0).addressString
-        return _peers.value.firstOrNull {
-            it.addresses.contains(address) || it.addressString == addressString
-        }?.name ?: addressString
+        for (name in events.connected) announce("Connected to $name")
+        for (name in events.lost) announce("Connection to $name lost")
     }
 
     /**
@@ -1618,8 +1631,8 @@ class ReceiverController private constructor(context: Context) {
             !_isRunning.value -> "Stopped"
             // Sending and peer connections keep working — say so instead of "Stopped".
             !_receiveEnabled.value -> "Receiving is off — peers stay connected"
-            audibleAddresses.isNotEmpty() ->
-                "Receiving from ${audibleAddresses.size} peer${if (audibleAddresses.size == 1) "" else "s"} — " +
+            audiblePeerIds.isNotEmpty() ->
+                "Receiving from ${audiblePeerIds.size} peer${if (audiblePeerIds.size == 1) "" else "s"} — " +
                     "buffer ${mixer.currentBufferMs} ms"
             _password.value.isEmpty() -> "Listening — set a password to receive audio"
             else -> "Listening on port ${settings.listenPort}"
