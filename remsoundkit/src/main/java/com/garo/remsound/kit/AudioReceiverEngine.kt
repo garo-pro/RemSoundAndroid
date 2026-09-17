@@ -39,6 +39,28 @@ class AudioReceiverEngine {
      */
     private var allowedSenderAddresses: Set<Int>? = null
 
+    /**
+     * Address -> peer identity, pushed by the app from discovery. A multi-homed peer (LAN +
+     * Tailscale) has several addresses that are all one box; without this map the engine cannot
+     * tell a second path to the same sender from a second sender, and opens a session for each.
+     * An address absent from the map is its own peer, which is how this behaved before.
+     */
+    private var peerGroups: Map<Int, String> = emptyMap()
+
+    /**
+     * The other path of a peer whose stream is already being played, whose Format packets are
+     * currently being ignored, and how many have been ignored. Surfaced in the diagnostics panel
+     * because a sender duplicating one stream down two paths is otherwise invisible from here —
+     * it just sounds like bad audio.
+     */
+    @Volatile
+    var duplicatePathEndpoint: UdpEndpoint? = null
+        private set
+
+    @Volatile
+    var duplicatePathIgnoredCount = 0L
+        private set
+
     private val peerSecurity = mutableMapOf<Int, PeerSecurityStatus>()
 
     @Volatile
@@ -109,6 +131,17 @@ class AudioReceiverEngine {
         )
         if (closed.isNotEmpty()) onSessionsChanged?.invoke()
     }
+
+    /**
+     * Declare which addresses belong to the same peer, so [handleFormat] can recognise a second
+     * path to a sender it is already playing. Keys are addresses, values any stable per-peer id.
+     */
+    fun setPeerAddressGroups(groups: Map<Int, String>) = synchronized(lock) {
+        peerGroups = groups
+    }
+
+    private fun peerKeyLocked(address: Int): String =
+        peerGroups[address] ?: UdpEndpoint(address, 0).addressString
 
     fun setAllowedSenders(addresses: Set<Int>?) {
         val toClose = mutableListOf<StreamSession>()
@@ -208,6 +241,8 @@ class AudioReceiverEngine {
         socket = sock
         startedAt = System.currentTimeMillis()
         diagnostics.reset() // counters read against uptime, so a restart starts them clean
+        duplicatePathEndpoint = null
+        duplicatePathIgnoredCount = 0L
 
         val executor = Executors.newSingleThreadScheduledExecutor { runnable ->
             Thread(runnable, "RemSound.ReceiverMaintenance").apply { isDaemon = true }
@@ -227,6 +262,7 @@ class AudioReceiverEngine {
         socket?.stop()
         socket = null
         startedAt = null
+        duplicatePathEndpoint = null
         synchronized(lock) { sessions.clear() }
         mixer.removeAllSessions()
     }
@@ -243,6 +279,14 @@ class AudioReceiverEngine {
     }
 
     // ---- Packet path (network thread) ----
+
+    /**
+     * Test seam: drive the packet path without binding a socket, the same way
+     * [PeerDiscoveryService.handleAnnouncement] is driven. Session routing is where the
+     * multi-path bugs live, and none of it needs a network to exercise.
+     */
+    internal fun handlePacketForTest(buffer: ByteArray, length: Int, remote: UdpEndpoint) =
+        handleRawPacket(buffer, length, remote)
 
     private fun handleRawPacket(buffer: ByteArray, length: Int, remote: UdpEndpoint) {
         bytesReceived += length
@@ -288,6 +332,8 @@ class AudioReceiverEngine {
         val format = parsed.format
 
         var isNew = false
+        var ignoredDuplicate: UdpEndpoint? = null
+        var reportDuplicate = false
         val superseded = mutableListOf<StreamSession>()
         synchronized(lock) {
             // Gate read under the lock: setPlaybackEnabled(false) flips it before disposing
@@ -309,26 +355,64 @@ class AudioReceiverEngine {
             val existing = sessions[key]
             if (existing != null && existing.matchesFormat(format)) return // nothing to do
 
+            // Every other session for the same peer and the same lane. Same PEER, not same
+            // endpoint: a multi-homed sender reaches us at several addresses, and before
+            // [peerGroups] existed each of those opened its own session, so one stream arriving
+            // down two paths was decoded twice and summed into the mix at two different path
+            // delays — double the CPU and audible comb filtering. Lane-mismatched sessions still
+            // coexist (BothIndependent mode really does send two lanes per peer).
+            val peerKey = peerKeyLocked(remote.address)
+            // Materialised as pairs, not as live map entries: the entries are removed below and
+            // a view object outliving its mapping is a trap waiting for a map implementation
+            // change.
+            val rivals = sessions.entries
+                .filter { entry ->
+                    entry.key != key &&
+                        peerKeyLocked(entry.key.endpoint.address) == peerKey &&
+                        entry.value.format.lane == format.lane
+                }
+                .map { it.key to it.value }
+
+            val now = System.currentTimeMillis()
+            for ((rivalKey, rivalSession) in rivals) {
+                if (rivalKey.endpoint.address == remote.address) {
+                    // Same path, new streamId (or a rebound source port): the sender rerolls
+                    // streamId on codec changes and engine restarts. Supersede at once so the old
+                    // session does not sit idle racking up phantom underruns.
+                    continue
+                }
+                // A DIFFERENT path of the same peer. If it is still delivering, this is a
+                // duplicate rather than a handover: ignore the newcomer and keep playing the path
+                // that already works, instead of tearing down a healthy stream (which would
+                // re-arm the jitter buffer) or, worse, playing both.
+                if (now - rivalSession.lastWriteTime <= PATH_HANDOVER_QUIET_MS) {
+                    ignoredDuplicate = remote
+                    reportDuplicate = duplicatePathEndpoint != remote
+                    duplicatePathEndpoint = remote
+                    duplicatePathIgnoredCount++
+                    return@synchronized
+                }
+            }
+
             val playout = mixer.getOrCreateSession(remote, streamId)
             isNew = existing == null
             if (isNew) sessionsOpenedCount++
             sessions[key] = StreamSession(remote, streamId, format, playout, decryptor, diagnostics)
 
-            // Same-lane streamId rotation: the sender rerolls streamId on codec changes and
-            // engine restarts; drop superseded sessions from this peer that share the lane so
-            // they do not sit idle racking up phantom underruns. Lane-mismatched sessions
-            // coexist (BothIndependent mode sends two concurrent lanes per peer).
-            val iterator = sessions.entries.iterator()
-            while (iterator.hasNext()) {
-                val entry = iterator.next()
-                if (entry.key.endpoint == remote &&
-                    entry.key.streamId != streamId &&
-                    entry.value.format.lane == format.lane
-                ) {
-                    superseded.add(entry.value)
-                    iterator.remove()
-                }
+            for ((rivalKey, rivalSession) in rivals) {
+                superseded.add(rivalSession)
+                sessions.remove(rivalKey)
             }
+            if (duplicatePathEndpoint?.address == remote.address) duplicatePathEndpoint = null
+        }
+
+        if (ignoredDuplicate != null) {
+            if (reportDuplicate) {
+                onDiagnostic?.invoke(
+                    "duplicate path ignored (same peer already streaming): $ignoredDuplicate",
+                )
+            }
+            return
         }
 
         for (old in superseded) {
@@ -397,5 +481,13 @@ class AudioReceiverEngine {
     companion object {
         const val SESSION_IDLE_TIMEOUT_MS = 4000L
         const val MAX_LIVE_SESSIONS = 32
+
+        /**
+         * How quiet the path currently being played has to go before another path of the same
+         * peer may take the lane over. Long enough that ordinary jitter cannot trigger a
+         * handover, short enough that a path that genuinely died is replaced before the idle
+         * prune (4 s) would have dropped it anyway.
+         */
+        const val PATH_HANDOVER_QUIET_MS = 1000L
     }
 }
