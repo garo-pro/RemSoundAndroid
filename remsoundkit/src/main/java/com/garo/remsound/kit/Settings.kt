@@ -112,12 +112,12 @@ class ReceiverSettings(context: Context, prefsName: String = PREFS_NAME) {
 
     /**
      * Continuously retune the playout target to what the link currently needs, instead of
-     * holding whatever the delay control was last set to. Default **off**, mirroring the
-     * Windows receiver's default for the same feature — it moves a value the user chose, so it
-     * is opt-in on every platform.
+     * holding whatever the delay control was last set to. Default **on** — see
+     * [DEFAULT_AUTO_TUNE_LATENCY_ENABLED], which is a deliberate divergence from the Windows
+     * receiver.
      */
     var autoTuneLatencyEnabled: Boolean
-        get() = prefs.getBoolean("autoTuneLatencyEnabled", false)
+        get() = prefs.getBoolean("autoTuneLatencyEnabled", DEFAULT_AUTO_TUNE_LATENCY_ENABLED)
         set(value) = prefs.edit().putBoolean("autoTuneLatencyEnabled", value).apply()
 
     /**
@@ -202,6 +202,26 @@ class ReceiverSettings(context: Context, prefsName: String = PREFS_NAME) {
 
         /** The Windows app's default, and the fallback for a profile written before the field. */
         const val DEFAULT_TARGET_LATENCY_MS = 80
+
+        /**
+         * Auto-tune is ON by default here, which upstream's is not. The divergence is
+         * deliberate and this port's networks are the reason: the Windows receiver's normal
+         * habitat is a LAN, where [DEFAULT_TARGET_LATENCY_MS] is comfortably more than the jitter
+         * and a fixed target is fine. A phone's is not — it is Wi-Fi with the screen off,
+         * cellular, a hotspot, a VPN, and it changes under the user mid-session. On those paths
+         * 80 ms is regularly less than the inter-arrival gap, and a fixed target then re-arms at
+         * the value that just failed, so the buffer sits permanently at the edge and crackles.
+         * Leaving the cure opt-in means the default configuration is the broken one on the
+         * networks this app actually runs over.
+         *
+         * The tuner is conservative by construction — second-highest gap rather than peak,
+         * raises in one step but lowers 5 ms per tick, capped at
+         * [LatencyAutoTune.RECOMMENDATION_CAP_MS] — and it never persists over a value the user
+         * chose (`autoTuneIsMovingTarget`). Turning it off restores upstream's behaviour exactly.
+         *
+         * Also the fallback for a profile written before the field existed.
+         */
+        const val DEFAULT_AUTO_TUNE_LATENCY_ENABLED = true
 
         fun clampLatency(ms: Int): Int = ms.coerceIn(MIN_TARGET_LATENCY_MS, MAX_TARGET_LATENCY_MS)
     }
