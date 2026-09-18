@@ -146,7 +146,12 @@ class DiscoveryAndProfileTest {
         assertFalse(decoded.sendEnabled)
         assertNull(decoded.selectedMicrophoneId)
         assertEquals(ReceiverSettings.DEFAULT_TARGET_LATENCY_MS, decoded.targetLatencyMs)
-        assertFalse(decoded.autoTuneLatencyEnabled)
+        // Tracks the app default rather than a literal: a profile with no auto-tune field
+        // predates the field, so the right answer is whatever a fresh install would do.
+        assertEquals(
+            ReceiverSettings.DEFAULT_AUTO_TUNE_LATENCY_ENABLED,
+            decoded.autoTuneLatencyEnabled,
+        )
     }
 
     @Test

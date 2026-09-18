@@ -26,7 +26,7 @@ data class ReceiverProfile(
      * because it changes the meaning of [targetLatencyMs]: with it on, the stored delay is a
      * starting point the tuner moves, not a value the profile pins.
      */
-    val autoTuneLatencyEnabled: Boolean = false,
+    val autoTuneLatencyEnabled: Boolean = ReceiverSettings.DEFAULT_AUTO_TUNE_LATENCY_ENABLED,
 ) {
     fun toJson(): JSONObject {
         val peers = JSONArray()
@@ -80,7 +80,10 @@ data class ReceiverProfile(
                     "targetLatencyMs",
                     ReceiverSettings.DEFAULT_TARGET_LATENCY_MS,
                 ),
-                autoTuneLatencyEnabled = json.optBoolean("autoTuneLatencyEnabled", false),
+                autoTuneLatencyEnabled = json.optBoolean(
+                    "autoTuneLatencyEnabled",
+                    ReceiverSettings.DEFAULT_AUTO_TUNE_LATENCY_ENABLED,
+                ),
             )
         }
     }
