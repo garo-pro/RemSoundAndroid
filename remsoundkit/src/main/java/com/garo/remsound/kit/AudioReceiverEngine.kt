@@ -53,9 +53,18 @@ class AudioReceiverEngine {
      * because a sender duplicating one stream down two paths is otherwise invisible from here —
      * it just sounds like bad audio.
      */
+    val duplicatePathEndpoint: UdpEndpoint?
+        get() = duplicatePathSeen?.takeIf {
+            System.currentTimeMillis() - duplicatePathLastIgnoredAt <= DUPLICATE_PATH_REPORT_MS
+        }
+
+    // The raw record behind [duplicatePathEndpoint]; the getter lets it lapse once the second
+    // copy stops arriving, instead of claiming forever that one is being ignored.
     @Volatile
-    var duplicatePathEndpoint: UdpEndpoint? = null
-        private set
+    private var duplicatePathSeen: UdpEndpoint? = null
+
+    @Volatile
+    private var duplicatePathLastIgnoredAt = 0L
 
     @Volatile
     var duplicatePathIgnoredCount = 0L
@@ -241,7 +250,7 @@ class AudioReceiverEngine {
         socket = sock
         startedAt = System.currentTimeMillis()
         diagnostics.reset() // counters read against uptime, so a restart starts them clean
-        duplicatePathEndpoint = null
+        duplicatePathSeen = null
         duplicatePathIgnoredCount = 0L
 
         val executor = Executors.newSingleThreadScheduledExecutor { runnable ->
@@ -262,8 +271,10 @@ class AudioReceiverEngine {
         socket?.stop()
         socket = null
         startedAt = null
-        duplicatePathEndpoint = null
-        synchronized(lock) { sessions.clear() }
+        synchronized(lock) {
+            sessions.clear()
+            duplicatePathSeen = null
+        }
         mixer.removeAllSessions()
     }
 
@@ -374,6 +385,7 @@ class AudioReceiverEngine {
                 .map { it.key to it.value }
 
             val now = System.currentTimeMillis()
+            val keptRivals = mutableSetOf<SessionKey>()
             for ((rivalKey, rivalSession) in rivals) {
                 if (rivalKey.endpoint.address == remote.address) {
                     // Same path, new streamId (or a rebound source port): the sender rerolls
@@ -385,10 +397,20 @@ class AudioReceiverEngine {
                 // duplicate rather than a handover: ignore the newcomer and keep playing the path
                 // that already works, instead of tearing down a healthy stream (which would
                 // re-arm the jitter buffer) or, worse, playing both.
+                //
+                // Not when this path already owns a session: that is a format change for a stream
+                // we are playing, and ignoring it would leave the session decoding with stale
+                // parameters.
                 if (now - rivalSession.lastWriteTime <= PATH_HANDOVER_QUIET_MS) {
+                    if (existing != null) {
+                        // Only update this path's own session; the other path keeps playing.
+                        keptRivals.add(rivalKey)
+                        continue
+                    }
                     ignoredDuplicate = remote
-                    reportDuplicate = duplicatePathEndpoint != remote
-                    duplicatePathEndpoint = remote
+                    reportDuplicate = duplicatePathSeen != remote
+                    duplicatePathSeen = remote
+                    duplicatePathLastIgnoredAt = now
                     duplicatePathIgnoredCount++
                     return@synchronized
                 }
@@ -400,10 +422,11 @@ class AudioReceiverEngine {
             sessions[key] = StreamSession(remote, streamId, format, playout, decryptor, diagnostics)
 
             for ((rivalKey, rivalSession) in rivals) {
+                if (rivalKey in keptRivals) continue
                 superseded.add(rivalSession)
                 sessions.remove(rivalKey)
             }
-            if (duplicatePathEndpoint?.address == remote.address) duplicatePathEndpoint = null
+            if (duplicatePathSeen?.address == remote.address) duplicatePathSeen = null
         }
 
         if (ignoredDuplicate != null) {
@@ -489,5 +512,8 @@ class AudioReceiverEngine {
          * prune (4 s) would have dropped it anyway.
          */
         const val PATH_HANDOVER_QUIET_MS = 1000L
+
+        /** How long after the last ignored duplicate Format Diagnostics still reports it. */
+        const val DUPLICATE_PATH_REPORT_MS = 5000L
     }
 }

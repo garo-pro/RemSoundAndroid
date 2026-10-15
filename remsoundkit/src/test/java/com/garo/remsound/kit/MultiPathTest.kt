@@ -139,7 +139,7 @@ class MultiPathTest {
 
     // ---- Duplicate-path sessions ----
 
-    private fun formatPacket(streamId: Int, lane: RenderRoute): ByteArray {
+    private fun formatPacket(streamId: Int, lane: RenderRoute, frameSamples: Int = 480): ByteArray {
         val format = AudioFormatInfo(
             sampleRate = 48000,
             channels = 2,
@@ -148,7 +148,7 @@ class MultiPathTest {
             blockAlign = 4,
             averageBytesPerSecond = 192000,
             codec = AudioTransportCodec.OPUS,
-            frameSamplesPerChannel = 480,
+            frameSamplesPerChannel = frameSamples,
             lane = lane,
         )
         return RemPacket.writeHeader(RemPacketType.FORMAT, streamId, 0) +
@@ -159,8 +159,9 @@ class MultiPathTest {
         from: String,
         streamId: Int,
         lane: RenderRoute = RenderRoute.MIXED,
+        frameSamples: Int = 480,
     ) {
-        val packet = formatPacket(streamId, lane)
+        val packet = formatPacket(streamId, lane, frameSamples)
         // Source port 51000: senders transmit from an ephemeral port, not the audio port.
         handlePacketForTest(packet, packet.size, UdpEndpoint.parseLiteral(from, 51000)!!)
     }
@@ -189,6 +190,29 @@ class MultiPathTest {
         assertNotNull(engine.duplicatePathEndpoint)
         assertEquals("100.101.102.103", engine.duplicatePathEndpoint?.addressString)
         assertEquals(1L, engine.duplicatePathIgnoredCount)
+    }
+
+    /**
+     * A path that already owns a session must still take a format change, even while the peer's
+     * other path is delivering — ignoring it as a "duplicate" left the session decoding with
+     * stale parameters. The other path keeps playing.
+     */
+    @Test
+    fun aFormatChangeOnAnOwnedPathIsAppliedNotIgnored() {
+        val engine = AudioReceiverEngine()
+        val lan = UdpEndpoint.parseLiteral("192.168.1.50", 0)!!.address
+        val vpn = UdpEndpoint.parseLiteral("100.101.102.103", 0)!!.address
+        // Both paths open before grouping is known, as after a handover.
+        engine.feedFormat("192.168.1.50", streamId = 7)
+        engine.feedFormat("100.101.102.103", streamId = 7)
+        assertEquals(2, engine.mixer.activeSessionCount)
+
+        engine.setPeerAddressGroups(mapOf(lan to "d-instance-a", vpn to "d-instance-a"))
+        engine.feedFormat("100.101.102.103", streamId = 7, frameSamples = 960)
+
+        assertEquals(2, engine.mixer.activeSessionCount)
+        assertNull(engine.duplicatePathEndpoint)
+        assertEquals(0L, engine.duplicatePathIgnoredCount)
     }
 
     /** Two genuinely different senders still get a session each. */
