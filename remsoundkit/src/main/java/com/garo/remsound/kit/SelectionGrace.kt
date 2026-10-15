@@ -23,22 +23,48 @@ package com.garo.remsound.kit
  */
 internal class SelectionGrace(private val graceMs: Long = DEFAULT_GRACE_MS) {
 
-    private val lastSeen = mutableMapOf<UdpEndpoint, Long>()
+    /** One remembered path: when it was last seen, which peer it belongs to, and how it is selected. */
+    internal data class Remembered(
+        val endpoint: UdpEndpoint,
+        /** Same identity the engine groups paths by (`d-<instanceId>` / `m-<manualId>`). */
+        val group: String,
+        /**
+         * Every string that can mark this peer as selected (all of its address strings, plus a
+         * manual peer's hostname). The peer is still selected while ANY of them is, which is the
+         * same rule `applyPeerSelection` uses for live peers — an expired path's own address
+         * string may never have been selected itself if the path appeared after the user ticked
+         * the peer.
+         */
+        val selectionKeys: Set<String>,
+    )
+
+    private val lastSeen = mutableMapOf<UdpEndpoint, Pair<Long, Remembered>>()
 
     /** Stamp every endpoint discovery can currently see for a selected peer. */
-    fun record(endpoints: Collection<UdpEndpoint>, now: Long) {
-        for (endpoint in endpoints) lastSeen[endpoint] = now
+    @Synchronized
+    fun record(
+        endpoints: Collection<UdpEndpoint>,
+        now: Long,
+        group: String = "",
+        selectionKeys: Set<String> = emptySet(),
+    ) {
+        for (endpoint in endpoints) {
+            val keys = selectionKeys + endpoint.addressString
+            lastSeen[endpoint] = now to Remembered(endpoint, group, keys)
+        }
     }
 
     /**
-     * Endpoints seen within the grace window, oldest entries dropped as it runs. The caller
+     * Paths seen within the grace window, oldest entries dropped as it runs. The caller
      * filters these against the live selection before allowing anything.
      */
-    fun remembered(now: Long): List<UdpEndpoint> {
-        lastSeen.entries.removeAll { now - it.value > graceMs }
-        return lastSeen.keys.toList()
+    @Synchronized
+    fun remembered(now: Long): List<Remembered> {
+        lastSeen.entries.removeAll { now - it.value.first > graceMs }
+        return lastSeen.values.map { it.second }
     }
 
+    @Synchronized
     fun clear() = lastSeen.clear()
 
     companion object {

@@ -784,7 +784,7 @@ class ReceiverController private constructor(context: Context) {
         // Which addresses belong to the same box, so the engine can tell a second path to one
         // sender from a second sender and refuse to play the same stream twice.
         val groups = mutableMapOf<Int, String>()
-        val selectedNow = mutableListOf<UdpEndpoint>()
+        val now = System.currentTimeMillis()
 
         for (peer in discovery.currentPeers) {
             unicast.addAll(peer.addresses)
@@ -795,8 +795,13 @@ class ReceiverController private constructor(context: Context) {
                 allowed.addAll(peer.addresses)
                 for (endpoint in peer.audioEndpoints) {
                     if (!tracked.contains(endpoint)) tracked.add(endpoint)
-                    selectedNow.add(endpoint)
                 }
+                selectionGrace.record(
+                    peer.audioEndpoints,
+                    now,
+                    group = "d-${peer.instanceId}",
+                    selectionKeys = peer.addressStrings.toSet(),
+                )
             }
         }
         for (peer in manualPeers) {
@@ -810,7 +815,12 @@ class ReceiverController private constructor(context: Context) {
                 ) {
                     allowed.add(endpoint.address)
                     if (!tracked.contains(endpoint)) tracked.add(endpoint)
-                    selectedNow.add(endpoint)
+                    selectionGrace.record(
+                        listOf(endpoint),
+                        now,
+                        group = "m-${peer.id}",
+                        selectionKeys = setOf(peer.host),
+                    )
                 }
             }
         }
@@ -820,10 +830,12 @@ class ReceiverController private constructor(context: Context) {
         // moment when a peer that is still streaming has aged out of discovery, and
         // setAllowedSenders would then close its live sessions. Remembered endpoints are
         // intersected with the CURRENT selection, so deselecting still cuts a peer instantly.
-        val now = System.currentTimeMillis()
-        selectionGrace.record(selectedNow, now)
-        for (endpoint in selectionGrace.remembered(now)) {
-            if (!selectedAddresses.contains(endpoint.addressString)) continue
+        for (kept in selectionGrace.remembered(now)) {
+            if (kept.selectionKeys.none { selectedAddresses.contains(it) }) continue
+            val endpoint = kept.endpoint
+            // An expired path has no discovery row, so without this it would be its own peer in
+            // the engine's eyes and could open a second session beside the live one.
+            if (kept.group.isNotEmpty()) groups.putIfAbsent(endpoint.address, kept.group)
             if (allowed.add(endpoint.address)) {
                 // Keep probing and announcing to it too: the heartbeat is the other half of the
                 // connected/lost rule, and the unicast announcement is what heals discovery.

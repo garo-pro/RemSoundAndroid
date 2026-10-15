@@ -96,7 +96,7 @@ class MultiPathTest {
         grace.record(listOf(ep("100.101.102.103")), now)
 
         // Ten seconds later discovery has expired the peer, but the grace window has not.
-        assertEquals(listOf(ep("100.101.102.103")), grace.remembered(now + 10_000))
+        assertEquals(listOf(ep("100.101.102.103")), grace.remembered(now + 10_000).map { it.endpoint })
         // A minute later a peer that really is gone stops being allowed.
         assertTrue(grace.remembered(now + 60_000).isEmpty())
     }
@@ -108,6 +108,25 @@ class MultiPathTest {
         grace.record(listOf(ep("192.168.1.50")), 8_000L)
         assertEquals(1, grace.remembered(15_000L).size)
         assertTrue(grace.remembered(20_000L).isEmpty())
+    }
+
+    /**
+     * The remembered path carries its peer group and every string that selects the peer, so the
+     * controller can keep it grouped with the live path and keep it allowed when the user selected
+     * the peer by a different address than the one that expired.
+     */
+    @Test
+    fun aRememberedPathKeepsItsGroupAndSelectionKeys() {
+        val grace = SelectionGrace()
+        grace.record(
+            listOf(ep("100.64.0.9")),
+            0L,
+            group = "d-abc",
+            selectionKeys = setOf("192.168.1.9", "100.64.0.9"),
+        )
+        val kept = grace.remembered(1_000L).single()
+        assertEquals("d-abc", kept.group)
+        assertTrue(kept.selectionKeys.contains("192.168.1.9"))
     }
 
     @Test
